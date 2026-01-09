@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Donders Reaction Time Experiment</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #ffffff;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #canvas {
+      border: 1px solid #000;
+      background: #ffffff;
+    }
+    #instructions, #results, #controls {
+      max-width: 800px;
+      margin: 8px auto;
+      text-align: center;
+    }
+    #controls button {
+      margin: 4px;
+      padding: 8px 16px;
+      font-size: 14px;
+    }
+    pre {
+      text-align: left;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      background: #f3f3f3;
+      padding: 8px;
+      border-radius: 4px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <canvas id="canvas" width="800" height="600"></canvas>
+  </div>
+
+  <div id="instructions">
+    <h2>Donders Reaction Time Experiment</h2>
+    <p id="instruction-text">
+      Press <b>Space</b> to begin. Follow on-screen instructions for each task.
+    </p>
+  </div>
+
+  <div id="controls">
+    <button id="start-btn">Start Experiment</button>
+    <button id="download-btn" disabled>Download CSV Results</button>
+  </div>
+
+  <div id="results">
+    <h3>Results</h3>
+    <pre id="results-text">No results yet.</pre>
+  </div>
+
+  <script>
+    // ==== Canvas setup ====
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const instructionText = document.getElementById('instruction-text');
+    const startBtn = document.getElementById('start-btn');
+    const downloadBtn = document.getElementById('download-btn');
+    const resultsText = document.getElementById('results-text');
+
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+
+    // Colors
+    const WHITE = '#FFFFFF';
+    const BLACK = '#000000';
+    const RED = '#FF0000';
+    const BLUE = '#0000FF';
+    const GREEN = '#00AA00';
+
+    // Experiment configuration
+    const TRIALS_PER_TASK = 10;
+    const TIMEOUT_MS = 2000; // 2 seconds
+
+    // State
+    let currentTask = 'idle'; // 'A', 'B', 'C', or 'done'
+    let trialIndex = 0;
+    let waitingForKey = false;
+    let currentStimulus = null;
+    let startTime = null;
+    let timeoutId = null;
+    let isGoTrial = false;
+
+    // Data storage
+    const results = {
+      A: [], // simple RT
+      B: [], // choice RT
+      C: []  // go/no-go RT (go trials only)
+    };
+
+    // ==== Utility drawing functions ====
+    function clearScreen(color = WHITE) {
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    }
+
+    function drawText(text, y = HEIGHT / 2, color = BLACK, fontSize = 28) {
+      clearScreen(WHITE);
+      ctx.fillStyle = color;
+      ctx.font = `${fontSize}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const lines = text.split('\n');
+      const lineHeight = fontSize * 1.4;
+      const totalHeight = lineHeight * lines.length;
+      let startY = y - totalHeight / 2;
+      lines.forEach((line, i) => {
+        ctx.fillText(line, WIDTH / 2, startY + i * lineHeight);
+      });
+    }
+
+    function drawFixation() {
+      clearScreen(WHITE);
+      ctx.fillStyle = BLACK;
+      ctx.font = '48px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('+', WIDTH / 2, HEIGHT / 2);
+    }
+
+    function drawCircle(color) {
+      clearScreen(WHITE);
+      ctx.beginPath();
+      ctx.arc(WIDTH / 2, HEIGHT / 2, 50, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+
+    // ==== Timing helper ====
+    function nowMs() {
+      // High-resolution timestamp
+      return performance.now();
+    }
+
+    // ==== Experiment flow ====
+
+    function resetExperiment() {
+      currentTask = 'idle';
+      trialIndex = 0;
+      waitingForKey = false;
+      currentStimulus = null;
+      startTime = null;
+      isGoTrial = false;
+      clearTimeout(timeoutId);
+      results.A = [];
+      results.B = [];
+      results.C = [];
+      resultsText.textContent = 'No results yet.';
+      downloadBtn.disabled = true;
+      drawText('Press Space or click "Start Experiment" to begin.');
+      instructionText.textContent =
+        'Press Space to begin. Follow on-screen instructions for each task.';
+    }
+
+    function startExperiment() {
+      resetExperiment();
+      instructionText.textContent = 'Task A: Simple reaction time.';
+      drawText(
+        'Task A:\nPress SPACE when the green circle appears.\n\nPress SPACE to start Task A.',
+        HEIGHT / 2
+      );
+      currentTask = 'await_start_A';
+      waitingForKey = true;
+    }
+
+    // Schedules a single trial
+    function scheduleNextTrial() {
+      clearTimeout(timeoutId);
+
+      if (trialIndex >= TRIALS_PER_TASK) {
+        // Move to next phase
+        if (currentTask === 'A') {
+          startTaskB();
+        } else if (currentTask === 'B') {
+          startTaskC();
+        } else if (currentTask === 'C') {
+          finishExperiment();
+        }
+        return;
+      }
+
+      // Show fixation cross
+      drawFixation();
+
+      // Random foreperiod 1–2 s
+      const foreperiod = 1000 + Math.random() * 1000;
+
+      timeoutId = setTimeout(() => {
+        if (currentTask === 'A') {
+          // Task A: always green, wait for Space
+          currentStimulus = { type: 'A', color: GREEN };
+          drawCircle(GREEN);
+          startTime = nowMs();
+          waitingForKey = true;
+          // Set timeout for missed response
+          timeoutId = setTimeout(() => {
+            waitingForKey = false;
+            trialIndex++;
+            scheduleNextTrial();
+          }, TIMEOUT_MS);
+        } else if (currentTask === 'B') {
+          // Task B: red (LEFT) or blue (RIGHT)
+          const color = Math.random() < 0.5 ? RED : BLUE;
+          currentStimulus = { type: 'B', color: color };
+          drawCircle(color);
+          startTime = nowMs();
+          waitingForKey = true;
+          timeoutId = setTimeout(() => {
+            waitingForKey = false;
+            trialIndex++;
+            scheduleNextTrial();
+          }, TIMEOUT_MS);
+        } else if (currentTask === 'C') {
+          // Task C: Go/No-Go (red = go, blue = no-go)
+          const color = Math.random() < 0.5 ? RED : BLUE;
+          isGoTrial = color === RED;
+          currentStimulus = { type: 'C', color: color, go: isGoTrial };
+          drawCircle(color);
+          startTime = nowMs();
+          waitingForKey = true;
+          timeoutId = setTimeout(() => {
+            waitingForKey = false;
+            // For no-go trials, just move on without recording
+            trialIndex++;
+            scheduleNextTrial();
+          }, TIMEOUT_MS);
+        }
+      }, foreperiod);
+    }
+
+    function startTaskA() {
+      currentTask = 'A';
+      trialIndex = 0;
+      instructionText.textContent =
+        'Task A: Press SPACE when the green circle appears.';
+      scheduleNextTrial();
+    }
+
+    function startTaskB() {
+      currentTask = 'await_start_B';
+      waitingForKey = true;
+      drawText(
+        'Task B:\nPress LEFT ARROW for RED, RIGHT ARROW for BLUE circle.\n\nPress SPACE to start Task B.',
+        HEIGHT / 2
+      );
+      instructionText.textContent =
+        'Task B: LEFT for red, RIGHT for blue.';
+    }
+
+    function startTaskC() {
+      currentTask = 'await_start_C';
+      waitingForKey = true;
+      drawText(
+        'Task C:\nPress SPACE only for RED circle. Ignore BLUE.\n\nPress SPACE to start Task C.',
+        HEIGHT / 2
+      );
+      instructionText.textContent =
+        'Task C: Press SPACE only when the circle is red; do nothing for blue.';
+    }
+
+    function finishExperiment() {
+      currentTask = 'done';
+      waitingForKey = false;
+      clearTimeout(timeoutId);
+      computeAndShowResults();
+      instructionText.textContent =
+        'Experiment finished. You can download your CSV results or press Start to run again.';
+      downloadBtn.disabled = false;
+    }
+
+    // ==== Key handling ====
+    function handleKeyDown(e) {
+      const key = e.key;
+
+      // Global start from idle
+      if (currentTask === 'idle' && key === ' ') {
+        startExperiment();
+        return;
+      }
+
+      if (!waitingForKey) return;
+
+      if (currentTask === 'await_start_A' && key === ' ') {
+        waitingForKey = false;
+        startTaskA();
+        return;
+      }
+
+      if (currentTask === 'await_start_B' && key === ' ') {
+        waitingForKey = false;
+        currentTask = 'B';
+        trialIndex = 0;
+        scheduleNextTrial();
+        return;
+      }
+
+      if (currentTask === 'await_start_C' && key === ' ') {
+        waitingForKey = false;
+        currentTask = 'C';
+        trialIndex = 0;
+        scheduleNextTrial();
+        return;
+      }
+
+      // During trials
+      if (currentTask === 'A') {
+        // Task A: simple RT, expect SPACE
+        if (key === ' ') {
+          const rt = nowMs() - startTime;
+          clearTimeout(timeoutId);
+          waitingForKey = false;
+          if (rt < TIMEOUT_MS) {
+            results.A.push(rt);
+          }
+          trialIndex++;
+          scheduleNextTrial();
+        }
+        return;
+      }
+
+      if (currentTask === 'B') {
+        // Task B: choice RT
+        const isRed = currentStimulus && currentStimulus.color === RED;
+        const isBlue = currentStimulus && currentStimulus.color === BLUE;
+        const correct =
+          (isRed && key === 'ArrowLeft') ||
+          (isBlue && key === 'ArrowRight');
+
+        if (correct) {
+          const rt = nowMs() - startTime;
+          clearTimeout(timeoutId);
+          waitingForKey = false;
+          if (rt < TIMEOUT_MS) {
+            results.B.push(rt);
+          }
+          trialIndex++;
+          scheduleNextTrial();
+        } else {
+          // incorrect or irrelevant key: treat as error (no RT stored)
+          clearTimeout(timeoutId);
+          waitingForKey = false;
+          trialIndex++;
+          scheduleNextTrial();
+        }
+        return;
+      }
+
+      if (currentTask === 'C') {
+        // Task C: go/no-go, only record RT on go (RED) trials with SPACE
+        if (key === ' ' && currentStimulus && currentStimulus.go) {
+          const rt = nowMs() - startTime;
+          clearTimeout(timeoutId);
+          waitingForKey = false;
+          if (rt < TIMEOUT_MS) {
+            results.C.push(rt);
+          }
+          trialIndex++;
+          scheduleNextTrial();
+        } else {
+          // Any key on no-go (BLUE) can just be treated as error; skip storing RT
+          clearTimeout(timeoutId);
+          waitingForKey = false;
+          trialIndex++;
+          scheduleNextTrial();
+        }
+        return;
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+
+    // ==== Results and CSV export ====
+
+    function mean(arr) {
+      if (!arr || arr.length === 0) return 0;
+      const sum = arr.reduce((a, b) => a + b, 0);
+      return sum / arr.length;
+    }
+
+    function computeAndShowResults() {
+      const avgA = mean(results.A);
+      const avgB = mean(results.B);
+      const avgC = mean(results.C);
+      const discriminationTime = avgC - avgA;
+      const responseSelectionTime = avgB - avgC;
+
+      const summary = [
+        'Experiment Results:',
+        '',
+        `Trials per task: ${TRIALS_PER_TASK}`,
+        '',
+        `Average Simple RT (A): ${avgA.toFixed(2)} ms  (n = ${results.A.length})`,
+        `Average Choice RT (B): ${avgB.toFixed(2)} ms  (n = ${results.B.length})`,
+        `Average Discrimination RT (C, go trials): ${avgC.toFixed(2)} ms  (n = ${results.C.length})`,
+        '',
+        `Discrimination Time (C - A): ${discriminationTime.toFixed(2)} ms`,
+        `Response Selection Time (B - C): ${responseSelectionTime.toFixed(2)} ms`,
+        '',
+        'Raw RTs (ms):',
+        `A: [${results.A.map(v => v.toFixed(2)).join(', ')}]`,
+        `B: [${results.B.map(v => v.toFixed(2)).join(', ')}]`,
+        `C: [${results.C.map(v => v.toFixed(2)).join(', ')}]`
+      ].join('\n');
+
+      resultsText.textContent = summary;
+
+      drawText('Experiment finished.\nSee results below.\nYou may download a CSV file.', HEIGHT / 2);
+    }
+
+    function buildCSV() {
+      const avgA = mean(results.A);
+      const avgB = mean(results.B);
+      const avgC = mean(results.C);
+      const discriminationTime = avgC - avgA;
+      const responseSelectionTime = avgB - avgC;
+
+      const lines = [];
+
+      // Summary section
+      lines.push('Section,Measure,Value,Notes');
+      lines.push(`Summary,Trials per task,${TRIALS_PER_TASK},`);
+      lines.push(`Summary,Average Simple RT (A),${avgA.toFixed(2)},ms`);
+      lines.push(`Summary,Average Choice RT (B),${avgB.toFixed(2)},ms`);
+      lines.push(`Summary,Average Discrimination RT (C),${avgC.toFixed(2)},ms`);
+      lines.push(`Summary,Discrimination Time (C - A),${discriminationTime.toFixed(2)},ms`);
+      lines.push(`Summary,Response Selection Time (B - C),${responseSelectionTime.toFixed(2)},ms`);
+      lines.push('');
+
+      // Raw RTs
+      lines.push('Task,Trial,RT_ms');
+      results.A.forEach((rt, i) => {
+        lines.push(`A,${i + 1},${rt.toFixed(2)}`);
+      });
+      results.B.forEach((rt, i) => {
+        lines.push(`B,${i + 1},${rt.toFixed(2)}`);
+      });
+      results.C.forEach((rt, i) => {
+        lines.push(`C,${i + 1},${rt.toFixed(2)}`);
+      });
+
+      return lines.join('\n');
+    }
+
+    function downloadCSV() {
+      const csvData = buildCSV();
+      const blob = new Blob([csvData], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.download = `donders_rt_${timestamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
+
+    // ==== Button handlers ====
+    startBtn.addEventListener('click', startExperiment);
+    downloadBtn.addEventListener('click', downloadCSV);
+
+    // Initial screen
+    resetExperiment();
+  </script>
+</body>
+</html>
